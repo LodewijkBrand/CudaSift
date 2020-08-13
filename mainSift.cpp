@@ -9,6 +9,7 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/core/persistence.hpp>
 
 #include "cudaImage.h"
 #include "cudaSift.h"
@@ -23,7 +24,19 @@ double ScaleUp(CudaImage &res, CudaImage &src);
 // Main program
 ///////////////////////////////////////////////////////////////////////////////
 int main(int argc, char **argv) 
-{    
+{
+  if (argc != 2){
+    std::cerr << "Error: please pass in a valid image path via commandline." << std::endl;
+    std::cerr << "For example:" << std::endl;
+    std::cerr << "  ./cudasift data/PASCALVOCIMAGE.png" << std::endl;
+    return 0;
+  }
+
+  std::string imgFilename = argv[1];
+  std::string imgName = imgFilename.substr(0, imgFilename.find("."));
+  std::cout << "Loading " << imgFilename << " for SIFT feature extraction." << std::endl;
+  std::string imgYaml = imgName + ".yaml";
+
   int devNum = 0, imgSet = 0;
   if (argc>1)
     devNum = std::atoi(argv[1]);
@@ -33,11 +46,9 @@ int main(int argc, char **argv)
   // Read images using OpenCV
   cv::Mat limg, rimg;
   if (imgSet) {
-    cv::imread("data/left.pgm", 0).convertTo(limg, CV_32FC1);
-    cv::imread("data/righ.pgm", 0).convertTo(rimg, CV_32FC1);
+    cv::imread(imgFilename, 0).convertTo(limg, CV_32FC1);
   } else {
-    cv::imread("data/img1.png", 0).convertTo(limg, CV_32FC1);
-    cv::imread("data/img2.png", 0).convertTo(rimg, CV_32FC1);
+    cv::imread(imgFilename, 0).convertTo(limg, CV_32FC1);
   }
   //cv::flip(limg, rimg, -1);
   unsigned int w = limg.cols;
@@ -54,42 +65,59 @@ int main(int argc, char **argv)
   img2.Download(); 
 
   // Extract Sift features from images
-  SiftData siftData1, siftData2;
+  SiftData siftData;
   float initBlur = 1.0f;
   float thresh = (imgSet ? 4.5f : 3.0f);
-  InitSiftData(siftData1, 32768, true, true); 
-  InitSiftData(siftData2, 32768, true, true);
-  
-  // A bit of benchmarking 
-  //for (int thresh1=1.00f;thresh1<=4.01f;thresh1+=0.50f) {
+  InitSiftData(siftData, 32768, true, true); 
   float *memoryTmp = AllocSiftTempMemory(w, h, 5, false);
-    for (int i=0;i<1000;i++) {
-      ExtractSift(siftData1, img1, 5, initBlur, thresh, 0.0f, false, memoryTmp);
-      ExtractSift(siftData2, img2, 5, initBlur, thresh, 0.0f, false, memoryTmp);
-    }
-    FreeSiftTempMemory(memoryTmp);
-    
-    // Match Sift features and find a homography
-    for (int i=0;i<1;i++)
-      MatchSiftData(siftData1, siftData2);
-    float homography[9];
-    int numMatches;
-    FindHomography(siftData1, homography, &numMatches, 10000, 0.00f, 0.80f, 5.0);
-    int numFit = ImproveHomography(siftData1, homography, 5, 0.00f, 0.80f, 3.0);
-    
-    std::cout << "Number of original features: " <<  siftData1.numPts << " " << siftData2.numPts << std::endl;
-    std::cout << "Number of matching features: " << numFit << " " << numMatches << " " << 100.0f*numFit/std::min(siftData1.numPts, siftData2.numPts) << "% " << initBlur << " " << thresh << std::endl;
-    //}
+  ExtractSift(siftData, img1, 5, initBlur, thresh, 0.0f, false, memoryTmp);
+
+	// Convert SiftData to Keypoints
+	std::vector<cv::KeyPoint> keypoints;
+	keypoints.resize(siftData.numPts);
+	cv::parallel_for_(cv::Range(0, siftData.numPts), [&](const cv::Range& range) {
+		for (int r = range.start; r < range.end; r++)
+		{
+			keypoints[r] = cv::KeyPoint(cv::Point2f(siftData.h_data[r].xpos, siftData.h_data[r].ypos), siftData.h_data[r].scale, siftData.h_data[r].orientation, siftData.h_data[r].score, siftData.h_data[r].subsampling, siftData.h_data[r].match);
+		}
+	});
+
+	// Convert SiftData to Mat Descriptor
+    cv::Mat descriptors;
+	std::vector<float> data;
+
+	for (int i = 0; i < siftData.numPts; i++)
+	{
+		data.insert(data.end(), siftData.h_data[i].data, siftData.h_data[i].data + 128);
+	}
+
+	cv::Mat tempDescriptor(siftData.numPts, 128, CV_32FC1, &data[0]);
+	//descriptors = tempDescriptor; // Buggy!
+	tempDescriptor.copyTo(descriptors); // Inefficient!
+
+    cv::FileStorage fs(imgYaml, cv::FileStorage::WRITE );
+    cv::write(fs, "descriptors", descriptors);
+    cv::write(fs, "keypoints", keypoints);
+    fs.release();
+
+    std::cout << "Saved YAML data at: " << imgYaml << std::endl;
+
+  FreeSiftTempMemory(memoryTmp);
   
   // Print out and store summary data
-  PrintMatchData(siftData1, siftData2, img1);
-  cv::imwrite("data/limg_pts.pgm", limg);
+  //cv::imwrite("data/limg_pts.pgm", limg);
 
   //MatchAll(siftData1, siftData2, homography);
   
   // Free Sift data from device
-  FreeSiftData(siftData1);
-  FreeSiftData(siftData2);
+  FreeSiftData(siftData);
+
+  /*
+  EasyGpuSift easy;
+  cv::Mat descript;
+
+  easy.compute(limg, descript, 1000);
+  */
 }
 
 void MatchAll(SiftData &siftData1, SiftData &siftData2, float *homography)

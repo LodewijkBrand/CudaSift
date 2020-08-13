@@ -1,3 +1,17 @@
+# Usage (Lodewijk Brand, MInDS, etc.)
+
+You'll want to have a cs-hpc-1 account. 
+
+```
+git clone https://github.com/LodewijkBrand/CudaSift.git
+cd CudaSift
+mkdir build
+cd build
+cmake ..
+make
+./cudasift PATH/TO/IMAGE.png
+```
+
 # CudaSift - SIFT features with CUDA
 
 This is the fourth version of a SIFT (Scale Invariant Feature Transform) implementation using CUDA for GPUs from NVidia. The first version is from 2007 and GPUs have evolved since then. This version is slightly more precise and considerably faster than the previous versions and has been optimized for Kepler and later generations of GPUs.
